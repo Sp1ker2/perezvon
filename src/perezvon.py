@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """«Перезвон» — программа оператора.
 
-Окно с кнопкой на панели задач: вкладка «Сегодня» (новый перезвон + все сегодняшние) и «История» (по датам).
-Крестик сворачивает в панель задач — в срок всплывает понятное напоминание со звуком.
+Окно: вкладка «Сегодня» (новый перезвон + все сегодняшние) и «История» (по датам).
+Крестик/«свернуть» убирают окно в маленькую иконку у края экрана (клик — открыть).
+В срок всплывает понятное напоминание со звуком.
 Перезвоны синхронизируются с сервером (админ видит все комнаты), без сети всё работает локально.
 """
 import datetime as dt
@@ -39,7 +40,8 @@ def now():
 class Settings:
     """Настройки — в settings.json; данные входа (token, user) — в зашифрованной сессии ui.Session."""
     DEFAULTS = {"server": pc.DEFAULT_SERVER, "local_mode": False,
-                "geom": None, "copy_fmt": "plus7", "sound": True, "bot": None, "form_open": True}
+                "geom": None, "copy_fmt": "plus7", "sound": True, "bot": None, "form_open": True,
+                "dock": {"edge": "right", "pos": 0.32, "mx": None, "my": None}}
 
     def __init__(self, path, session):
         self.path = path
@@ -363,8 +365,8 @@ class MainWindow:
                 self.win.after(30, lambda: (target.focus_force(), target.icursor("end")))
 
     def minimize(self):
-        """Крестик и Esc — свернуть в панель задач; программа продолжает напоминать."""
-        self.win.iconify()
+        """Крестик, «свернуть» и Esc — окно прячется в иконку у края экрана; программа продолжает напоминать."""
+        self.app.collapse()
 
     def escape(self):
         if self.edit_id:
@@ -394,6 +396,8 @@ class MainWindow:
     def save_geom(self):
         self._geom_job = None
         try:
+            if self.win.state() != "normal" or not self.win.winfo_ismapped():
+                return                          # скрытое/свёрнутое окно — его координаты не настоящие
             g = [self.win.winfo_x(), self.win.winfo_y(), self.win.winfo_width(), self.win.winfo_height()]
         except tk.TclError:
             return
@@ -806,6 +810,212 @@ class MainWindow:
                 side="right", padx=px(8))
 
 
+# ═══════════════════════════════ иконка у края экрана ═══════════════════════════════
+
+class Tab:
+    """Маленькая иконка у края или в углу экрана — в неё сворачивается окно. Клик — открыть окно.
+    Перетаскивается и прилипает к ближайшему краю/углу. Показывает, сколько ждут и сколько до ближайшего."""
+
+    def __init__(self, app):
+        self.app = app
+        self.win = tk.Toplevel(app.root)
+        self.win.withdraw()
+        self.win.overrideredirect(True)
+        self.win.attributes("-topmost", True)
+        self.win.configure(bg=C["accent"])
+        self.cv = tk.Canvas(self.win, highlightthickness=0, bd=0, bg=C["accent"], cursor="hand2")
+        self.cv.pack(fill="both", expand=True)
+        self.hover = False
+        self.drag = None
+        self.pulse = False
+        self.shown = False
+        for ev, fn in (("<ButtonPress-1>", self.press), ("<B1-Motion>", self.motion),
+                       ("<ButtonRelease-1>", self.release), ("<Enter>", self.enter), ("<Leave>", self.leave),
+                       ("<Button-3>", self.menu)):
+            self.cv.bind(ev, fn)
+        self.win.update_idletasks()
+        ui.tool_window(self.win)
+        ui.no_activate(self.win)
+        ui.Tooltip(self.cv, lambda: "Перезвон — нажмите, чтобы открыть\nПеретащите к любому краю или углу\n"
+                                    "%s — открыть с клавиатуры" % HOTKEY_TEXT)
+
+    # ── показ
+    def show(self):
+        self.place()
+        self.win.deiconify()
+        ui.raise_top(self.win)
+        self.shown = True
+        self.redraw()
+
+    def hide(self):
+        self.win.withdraw()
+        self.shown = False
+
+    # ── геометрия
+    def size(self, edge):
+        if edge in ("left", "right"):
+            return px(46), px(128)
+        if edge in ("top", "bottom"):
+            return px(160), px(44)
+        return px(62), px(62)
+
+    def area(self):
+        d = self.app.settings["dock"] or {}
+        if d.get("mx") is None:
+            return ui.work_area(self.win.winfo_screenwidth() // 2, self.win.winfo_screenheight() // 2)
+        return ui.work_area(d["mx"], d["my"])
+
+    def geometry_for(self, edge, pos, area):
+        l, t, r, b = area
+        w, h = self.size(edge)
+        pos = max(0.0, min(1.0, pos))
+        if edge == "left":
+            x, y = l, t + pos * (b - t - h)
+        elif edge == "right":
+            x, y = r - w, t + pos * (b - t - h)
+        elif edge == "top":
+            x, y = l + pos * (r - l - w), t
+        elif edge == "bottom":
+            x, y = l + pos * (r - l - w), b - h
+        else:
+            x = l if edge[1] == "l" else r - w
+            y = t if edge[0] == "t" else b - h
+        return int(w), int(h), int(x), int(y)
+
+    def place(self):
+        d = self.app.settings["dock"] or {}
+        w, h, x, y = self.geometry_for(d.get("edge", "right"), d.get("pos", 0.32), self.area())
+        self.win.geometry("%dx%d+%d+%d" % (w, h, x, y))
+        self.win.update_idletasks()
+
+    @staticmethod
+    def snap(cx, cy, area, thr):
+        """Куда прилипнуть: ближайший край, а если рядом два края — угол. Возвращает (edge, pos)."""
+        l, t, r, b = area
+        dl, dr, dtop, db = cx - l, r - cx, cy - t, b - cy
+        if min(dl, dr) < thr and min(dtop, db) < thr:
+            return ("t" if dtop < db else "b") + ("l" if dl < dr else "r"), 0.0
+        m = min(dl, dr, dtop, db)
+        if m in (dl, dr):
+            return ("left" if m == dl else "right"), (cy - t) / max(1, b - t)
+        return ("top" if m == dtop else "bottom"), (cx - l) / max(1, r - l)
+
+    # ── мышь
+    def press(self, e):
+        self.drag = {"x": e.x_root, "y": e.y_root, "wx": self.win.winfo_x(), "wy": self.win.winfo_y(), "moved": False}
+
+    def motion(self, e):
+        if not self.drag:
+            return
+        dx, dy = e.x_root - self.drag["x"], e.y_root - self.drag["y"]
+        if not self.drag["moved"] and abs(dx) + abs(dy) < px(6):
+            return
+        if not self.drag["moved"]:
+            self.drag["moved"] = True
+            w, h = px(62), px(62)
+            self.win.geometry("%dx%d" % (w, h))
+            self.drag["wx"], self.drag["wy"] = e.x_root - w // 2, e.y_root - h // 2
+            self.drag["x"], self.drag["y"] = e.x_root, e.y_root
+            self.cv.delete("all")
+            self.cv.configure(bg=C["accent_h"])
+            self.cv.create_text(w // 2, h // 2, text=I["phone"], font=ifont(18), fill=C["white"])
+        self.win.geometry("+%d+%d" % (self.drag["wx"] + dx, self.drag["wy"] + dy))
+
+    def release(self, e):
+        d = self.drag
+        self.drag = None
+        if not d:
+            return
+        if not d["moved"]:
+            self.app.show_main()
+            return
+        area = ui.work_area(e.x_root, e.y_root)
+        edge, pos = self.snap(e.x_root, e.y_root, area, px(140))
+        self.app.settings["dock"] = {"edge": edge, "pos": pos, "mx": e.x_root, "my": e.y_root}
+        self.place()
+        self.redraw()
+
+    def enter(self, _e):
+        self.hover = True
+        self.redraw()
+
+    def leave(self, _e):
+        self.hover = False
+        self.redraw()
+
+    def menu(self, e):
+        m = tk.Menu(self.win, tearoff=0, bg=C["card"], fg=C["text"], activebackground=C["accent_d"],
+                    activeforeground=C["white"], bd=0, font=font(10))
+        m.add_command(label="Открыть      " + HOTKEY_TEXT, command=self.app.show_main)
+        m.add_command(label="Настройки", command=self.app.open_settings)
+        m.add_separator()
+        m.add_command(label="Закрыть программу", command=self.app.quit)
+        m.tk_popup(e.x_root, e.y_root)
+
+    # ── рисование
+    def redraw(self):
+        if not self.shown or (self.drag and self.drag.get("moved")):
+            return
+        app = self.app
+        act = app.store.active()
+        t = now()
+        nxt = act[0] if act else None
+        urg = pc.urgency(nxt["due"], t) if nxt else "none"
+        overdue = urg in ("due", "missed")
+        base = {"due": C["red"], "missed": C["red"], "soon": C["amber"]}.get(urg, C["accent"])
+        if overdue and self.pulse:
+            base = C["red_h"]
+        if self.hover:
+            base = ui.blend(base, "#FFFFFF", 0.12)
+        cv = self.cv
+        cv.delete("all")
+        cv.configure(bg=base)
+        self.win.configure(bg=base)
+        edge = (app.settings["dock"] or {}).get("edge", "right")
+        w, h = self.size(edge)
+        n = len(act)
+        icon = I["ringer"] if overdue else I["phone"]
+        left = ""
+        if nxt:
+            sec = nxt["due"] - t
+            if sec <= 0:
+                left = "сейчас"
+            elif sec < 3600:
+                left = "%d:%02d" % (sec // 60, sec % 60)
+            else:
+                left = "%dч" % (sec // 3600) if sec < 86400 else "%dд" % (sec // 86400)
+        fg = C["white"]
+        shade = ui.blend(base, "#000000", 0.25)
+        if edge in ("left", "right"):
+            cv.create_text(w // 2, px(22), text=icon, font=ifont(15), fill=fg)
+            if n:
+                cv.create_text(w // 2, px(58), text=str(n), font=font(16, True), fill=fg)
+                cv.create_text(w // 2, px(84), text="ждут" if not overdue else "пора!", font=font(7, True), fill=fg)
+                cv.create_text(w // 2, px(108), text=left, font=font(8, True), fill=fg)
+            else:
+                cv.create_text(w // 2, px(78), text="ПЕРЕЗВОН", font=font(7, True), fill=fg, angle=90)
+            x = 0 if edge == "right" else w - 1
+            cv.create_line(x, 0, x, h, fill=shade)
+        elif edge in ("top", "bottom"):
+            cv.create_text(px(22), h // 2, text=icon, font=ifont(14), fill=fg)
+            if n:
+                cv.create_text(px(44), h // 2, text=str(n), font=font(14, True), fill=fg, anchor="w")
+                cv.create_text(w - px(12), h // 2, text=left, font=font(9, True), fill=fg, anchor="e")
+            else:
+                cv.create_text(px(44), h // 2, text="Перезвон", font=font(10, True), fill=fg, anchor="w")
+        else:
+            cv.create_text(w // 2, px(24) if n else h // 2, text=icon, font=ifont(17), fill=fg)
+            if n:
+                cv.create_text(w // 2, px(46), text="%d · %s" % (n, left) if left and len(left) <= 5 else str(n),
+                               font=font(8, True), fill=fg)
+        if app.sync.need_login or (app.sync.error and app.settings["token"]):
+            cv.create_oval(px(4), px(4), px(10), px(10), fill=C["amber"], outline="")
+
+    def keep_on_top(self):
+        if self.shown and not self.drag:
+            ui.raise_top(self.win)
+
+
 # ═══════════════════════════════ напоминания ═══════════════════════════════
 
 class Reminder:
@@ -943,8 +1153,9 @@ class Reminders:
         root = self.app.root
         if root.state() == "normal":
             cx, cy = root.winfo_rootx() + root.winfo_width() // 2, root.winfo_rooty() + 10
-        else:                                       # свёрнуто: координаты окна -32000 — берём главный монитор
-            cx, cy = root.winfo_screenwidth() // 2, root.winfo_screenheight() // 2
+        else:                                       # свёрнуто в иконку — тот монитор, где иконка
+            l, top, r, b = self.app.tab.area()
+            cx, cy = (l + r) // 2, (top + b) // 2
         l, top, r, b = ui.work_area(cx, cy)
         gap = px(10)
         w = px(Reminder.W)
@@ -1122,7 +1333,7 @@ class SettingsDialog(Dialog):
             chips.append(ch)
 
         sec = self.section("СИСТЕМА")
-        r = self.row(sec, "Запускать вместе с Windows", "Перезвон сам запустится свёрнутым в панель задач")
+        r = self.row(sec, "Запускать вместе с Windows", "Перезвон сам запустится иконкой у края экрана")
         self.toggle(r, bool(ui.autostart_get(pc.APP_NAME)), app.set_autostart).pack(side="right")
         hk = "работает" if app.hotkey and app.hotkey.ok else ("занята другой программой" if app.hotkey else "выключена")
         self.row(sec, "Горячая клавиша: " + HOTKEY_TEXT, "Открыть окно из любой программы (%s). "
@@ -1134,8 +1345,9 @@ class SettingsDialog(Dialog):
         self.srv.pack(side="right", ipady=px(4))
         self.srv.bind("<FocusOut>", lambda e: self.save_server())
         self.srv.bind("<Return>", lambda e: self.save_server())
-        r = self.row(sec, "Закрыть программу", "Крестик окна только сворачивает в панель задач, чтобы напоминания "
-                                              "приходили. Если закрыть — напоминаний не будет до следующего запуска.")
+        r = self.row(sec, "Закрыть программу", "Крестик окна только сворачивает его в иконку у края экрана, чтобы "
+                                              "напоминания приходили. Если закрыть — напоминаний не будет до "
+                                              "следующего запуска.")
         ui.Btn(r, "Закрыть", command=self.app.quit, bg=C["chip"], fg=C["red"], size=9, padx=10, pady=4).pack(side="right")
         tk.Label(self.body, text="Перезвон %s" % pc.APP_VERSION, font=font(8), fg=C["faint"], bg=C["surface"]).pack(
             anchor="w", pady=(px(14), 0))
@@ -1173,6 +1385,8 @@ class App:
         self.sync = Sync(self)
         self.reminders = Reminders(self)
         self.main = MainWindow(self)
+        self.tab = Tab(self)
+        self.root.bind("<Unmap>", self.on_unmap, add="+")
         self.hotkey = None
         self.settings_win = None
         self.login_win = None
@@ -1185,7 +1399,7 @@ class App:
             self.store.adopt(u["id"])          # починка списков, оставшихся от прошлого пользователя
         self.main.place_initial()
         if minimized:
-            self.root.iconify()                # автозапуск: сразу в панель задач, окно не выскакивает
+            self.collapse()                    # автозапуск: сразу иконкой у края, окно не выскакивает
         else:
             self.root.deiconify()
         ui.dark_titlebar(self.root)
@@ -1215,6 +1429,8 @@ class App:
     def loop_second(self):
         t = now()
         self.reminders.tick(t)
+        self.tab.pulse = not self.tab.pulse
+        self.tab.redraw()
         if self.main.visible():
             self.main.refresh()
             if self.sync.last_ok:
@@ -1223,6 +1439,7 @@ class App:
         self.root.after(1000 - int((time.time() % 1) * 1000) + 5, self.loop_second)
 
     def loop_slow(self):
+        self.tab.keep_on_top()
         self.reminders.keep_on_top()
         self.root.after(3000, self.loop_slow)
 
@@ -1253,18 +1470,31 @@ class App:
     # ── действия
     def hotkey_pressed(self):
         if self.main.visible() and ui.foreground_is_ours():
-            self.main.minimize()
+            self.collapse()
         else:
             self.show_main()
 
     def show_main(self):
+        self.tab.hide()
         self.main.show(focus=True)
+
+    def collapse(self):
+        """Окно → маленькая иконка у края экрана (без кнопки на панели задач)."""
+        self.main.save_geom()
+        self.root.withdraw()
+        self.tab.show()
+
+    def on_unmap(self, e):
+        # кнопка «свернуть» в заголовке окна тоже сворачивает в иконку, а не в панель задач
+        if e.widget is self.root and self.root.state() == "iconic":
+            self.root.after_idle(self.collapse)
 
     def changed(self):
         self.sync.kick()
         self.main.refresh(force=True)
         self.reminders.tick(now())
         self.update_title()
+        self.tab.redraw()
 
     def done(self, iid):
         it = self.store.items.get(iid)
@@ -1463,6 +1693,23 @@ def _shortcut(lnk, target):
         pass
 
 
+def _install_log(msg):
+    try:
+        with open(os.path.join(install_dir(), "install.log"), "a", encoding="utf-8") as f:
+            f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + msg + "\n")
+    except OSError:
+        pass
+
+
+def _launch_clean(path, args=()):
+    """Запуск другой PyInstaller-программы: без наших служебных переменных, иначе новая копия может
+    взять временную папку этой (которую мы сейчас удалим при выходе) и упасть."""
+    env = {k: v for k, v in os.environ.items() if not (k.startswith("_PYI") or k.startswith("_MEI"))}
+    env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    subprocess.Popen([path] + list(args), close_fds=True, env=env, cwd=os.path.dirname(path),
+                     creationflags=0x00000008 | 0x00000200)
+
+
 def self_install():
     """exe запущен не из папки установки → копируем себя в %LOCALAPPDATA%\\Perezvon, ярлыки, автозапуск.
 
@@ -1478,7 +1725,7 @@ def self_install():
     same = os.path.exists(target) and _sha(target) == _sha(sys.executable)
     if not same:
         if _mutex_exists(INSTANCE):                       # старая версия запущена — просим выйти
-            ui.SingleInstance(INSTANCE).signal_quit()
+            ui.signal_instance(INSTANCE, "quit")
             for _ in range(50):
                 time.sleep(0.2)
                 if not _mutex_exists(INSTANCE):
@@ -1492,6 +1739,7 @@ def self_install():
             except OSError:
                 time.sleep(0.3)
         else:
+            _install_log("не удалось заменить %s — работаю из %s" % (target, sys.executable))
             return False                                  # не вышло — работаем из текущего места
     want = '"%s" --autostart' % target
     if ui.autostart_get(pc.APP_NAME) != want:
@@ -1503,10 +1751,19 @@ def self_install():
     if os.path.isdir(desk):
         _shortcut(os.path.join(desk, "Перезвон.lnk"), target)
     if _mutex_exists(INSTANCE):
-        ui.SingleInstance(INSTANCE).signal_show()
-    else:
-        subprocess.Popen([target], close_fds=True, creationflags=0x00000008 | 0x00000200)
-    return True
+        ui.signal_instance(INSTANCE, "show")
+        _install_log("уже запущена — показал окно")
+        return True
+    for attempt in range(3):                              # запускаем и убеждаемся, что поднялась
+        _launch_clean(target)
+        for _ in range(60):
+            time.sleep(0.25)
+            if _mutex_exists(INSTANCE):
+                _install_log("установлено и запущено: %s (попытка %d)" % (target, attempt + 1))
+                return True
+        _install_log("новая копия не поднялась за 15 с — пробую ещё раз")
+    _install_log("не удалось запустить установленную копию — работаю из %s" % sys.executable)
+    return False
 
 
 def main():

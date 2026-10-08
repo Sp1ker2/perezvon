@@ -618,6 +618,21 @@ def force_foreground(win):
         pass
 
 
+def signal_instance(name, which):
+    """Послать уже запущенной копии «show»/«quit», НЕ создавая мьютекс (иначе сами же сочтём её живой)."""
+    if not IS_WIN:
+        return False
+    k32 = ctypes.windll.kernel32
+    k32.OpenEventW.restype = wt.HANDLE
+    h = k32.OpenEventW(0x0002, False, "Local\\%s.%s" % (name, which))   # EVENT_MODIFY_STATE
+    if not h:
+        return False
+    try:
+        return bool(k32.SetEvent(h))
+    finally:
+        k32.CloseHandle(h)
+
+
 class SingleInstance:
     """Именованный мьютекс + события «покажись» и «выйди» для второго запуска."""
 

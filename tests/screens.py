@@ -106,6 +106,12 @@ def client_shots(S):
     app.main.open_form(False, focus=False)
     pump(app.root, 0.4)
     shot(app.root, "main_collapsed")
+    app.collapse()
+    for edge in ("right", "top", "br"):
+        app.settings["dock"] = {"edge": edge, "pos": 0.4, "mx": None, "my": None}
+        app.tab.show()
+        pump(app.root, 0.4)
+        shot(app.tab.win, "tab_" + edge)
     rem = app.reminders.open.get(late["id"])
     if rem:
         shot(rem.win, "client_reminder")

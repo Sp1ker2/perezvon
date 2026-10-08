@@ -186,13 +186,63 @@ class ClientApp(unittest.TestCase):
         walk(w)
         return out
 
-    def test_starts_in_taskbar_and_cross_minimizes(self):
-        self.assertEqual(self.app.root.state(), "iconic")         # автозапуск: окно не выскакивает
-        self.assertFalse(self.app.root.overrideredirect())        # обычное окно → есть кнопка на панели задач
-        self.assertTrue(self.app.root.protocol("WM_DELETE_WINDOW"))
-        self.m.minimize()
-        self.assertEqual(self.app.root.state(), "iconic")
-        self.assertTrue(self.app.root.winfo_exists())               # крестик не закрывает программу
+    def test_collapses_to_edge_icon(self):
+        self.assertEqual(self.app.root.state(), "withdrawn")      # автозапуск: окна нет, только иконка
+        self.assertTrue(self.app.tab.shown)
+        self.assertTrue(self.app.tab.win.winfo_viewable())
+        self.assertEqual(self.app.tab.win.attributes("-topmost"), 1)
+        shown = []
+        self.m.show = lambda focus=True: shown.append(focus)       # не открываем по-настоящему (фокус)
+        self.app.tab.drag = {"x": 0, "y": 0, "wx": 0, "wy": 0, "moved": False}
+        self.app.tab.release(None)                                # клик по иконке
+        self.assertEqual(shown, [True])
+        self.assertFalse(self.app.tab.shown)                      # окно открыто — иконка спрятана
+        self.m.minimize()                                         # крестик
+        self.assertEqual(self.app.root.state(), "withdrawn")
+        self.assertTrue(self.app.tab.shown)
+        self.assertTrue(self.app.root.winfo_exists())             # программа не закрылась
+        self.app.root.state("iconic")                             # кнопка «свернуть» в заголовке
+        pump(self.app.root, 0.3)
+        self.assertEqual(self.app.root.state(), "withdrawn")
+        self.assertTrue(self.app.tab.shown)
+
+    def test_tab_snap_and_inside_screen(self):
+        area = (0, 0, 1920, 1040)
+        snap = perezvon.Tab.snap
+        self.assertEqual(snap(1910, 500, area, 140)[0], "right")
+        self.assertEqual(snap(5, 500, area, 140)[0], "left")
+        self.assertEqual(snap(900, 3, area, 140)[0], "top")
+        self.assertEqual(snap(900, 1030, area, 140)[0], "bottom")
+        self.assertEqual(snap(1900, 20, area, 140)[0], "tr")
+        self.assertEqual(snap(10, 1030, area, 140)[0], "bl")
+        self.assertAlmostEqual(snap(1910, 520, area, 140)[1], 0.5, delta=0.01)
+        l, t, r, b = self.app.tab.area()
+        for edge in ("left", "right", "top", "bottom", "tl", "tr", "bl", "br"):
+            self.app.settings["dock"] = {"edge": edge, "pos": 0.9, "mx": None, "my": None}
+            self.app.tab.show()
+            pump(self.app.root, 0.05)
+            w = self.app.tab.win
+            x, y = w.winfo_x(), w.winfo_y()
+            self.assertGreaterEqual(x, l - 1, edge)
+            self.assertGreaterEqual(y, t - 1, edge)
+            self.assertLessEqual(x + w.winfo_width(), r + 1, edge)
+            self.assertLessEqual(y + w.winfo_height(), b + 1, edge)
+        self.app.settings["dock"] = {"edge": "right", "pos": 0.3, "mx": None, "my": None}
+        self.app.tab.show()
+
+    def test_tab_shows_count_and_due(self):
+        self.app.store.add("К", "111", "", time.time() + 600)
+        self.app.changed()
+        texts = [self.app.tab.cv.itemcget(i, "text") for i in self.app.tab.cv.find_all()
+                 if self.app.tab.cv.type(i) == "text"]
+        self.assertIn("1", texts)
+        self.assertIn("ждут", texts)
+        self.app.store.add("Пора", "222", "", time.time() - 5)
+        self.app.changed()
+        texts = [self.app.tab.cv.itemcget(i, "text") for i in self.app.tab.cv.find_all()
+                 if self.app.tab.cv.type(i) == "text"]
+        self.assertIn("пора!", texts)
+        self.assertIn(self.app.tab.cv.cget("bg").upper(), (ui.C["red"].upper(), ui.C["red_h"].upper()))
 
     def test_form_validation_and_add(self):
         p = self.m
