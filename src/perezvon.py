@@ -122,6 +122,12 @@ class Sync:
             self.error = None
             self.need_login = False
             self.last_ok = now()
+            u = res.get("user") or {}
+            if u.get("id") is not None and app.store.owner != u["id"]:
+                app.adopt_user(u["id"])
+                self.kick(0.1)                 # сразу скачать список этого пользователя
+                app.refresh_status()
+                return
             ext = app.store.apply_sync(pushed, res)
             if res.get("bot") and res["bot"] != app.settings["bot"]:
                 app.settings["bot"] = res["bot"]
@@ -1174,6 +1180,9 @@ class App:
         self.last_title = None
         self.refresh_header()
         self.refresh_status()
+        u = self.settings["user"] or {}
+        if self.settings["token"] and u.get("id") is not None:
+            self.store.adopt(u["id"])          # починка списков, оставшихся от прошлого пользователя
         self.main.place_initial()
         if minimized:
             self.root.iconify()                # автозапуск: сразу в панель задач, окно не выскакивает
@@ -1303,7 +1312,16 @@ class App:
             return
         self.login_win = LoginDialog(self, reason)
 
+    def adopt_user(self, user_id):
+        if self.store.adopt(user_id):
+            for iid in list(self.reminders.open):
+                self.reminders.close(iid)
+            self.main.refresh(force=True)
+            self.update_title()
+
     def after_login(self):
+        u = self.settings["user"] or {}
+        self.adopt_user(u.get("id"))
         self.sync.need_login = False
         self.sync.error = None
         self.sync.next_at = 0

@@ -472,6 +472,32 @@ class ClientApp(unittest.TestCase):
         self.assertEqual(self.m.f_fio.get(), "К")
         self.m.cancel_edit()
 
+    def test_switch_user_without_logout(self):
+        """Сессия кончилась (401) или просто вошли другим ником без «Выйти» — чужие перезвоны не показываем."""
+        self.S.app.create_user("Олег", "vn2", "operator", "oleg_kim")
+        self.login_as("@anna_smirnova")
+        a = self.app.store.add("Клиент Анны", "89991112233", "", time.time() + 600)
+        self.sync_now()
+        self.app.settings["token"] = None              # как после 401 — без кнопки «Выйти»
+        self.login_as("@oleg_kim")
+        self.assertNotIn(a["id"], self.app.store.items)
+        o = self.app.store.add("Клиент Олега", "89994445566", "", time.time() + 900)
+        self.sync_now()
+        self.assertEqual([i["fio"] for i in self.app.store.active()], ["Клиент Олега"])
+        self.assertEqual(self.S.app.item(o["id"])["operator"], "Олег")
+        self.assertEqual(self.S.app.item(a["id"])["operator"], "Анна Смирнова")   # на сервере у Анны
+        # старый файл без владельца (как на ПК после версии 1.0.0) чинится при запуске
+        self.app.store.owner = None
+        self.app.store.items[a["id"]] = dict(a, srv_rev=3, dirty=False)
+        self.app.store.save()
+        self.app.root.destroy()
+        self.app = perezvon.App(self.home, minimized=True)
+        self.assertNotIn(a["id"], self.app.store.items)
+        self.app.start(hotkey=False)
+        self.m = self.app.main
+        self.sync_now()
+        self.assertEqual([i["fio"] for i in self.app.store.active()], ["Клиент Олега"])
+
     def test_settings_and_survive_restart(self):
         self.app.open_settings()
         pump(self.app.root, 0.2)

@@ -11,7 +11,7 @@
 | `server/perezvon_server.py` | сервер (API + бот), один файл, чистый Python 3.9+ |
 | `server/install.sh`, `server/perezvon.service` | установка на 89.124.122.158 |
 | `src/` | исходники программ, `build.py` — сборка exe |
-| `tests/` | автотесты (87), `tests/screens.py` — снимки окон (только сами окна программы) |
+| `tests/` | автотесты (89), `tests/screens.py` — снимки окон (только сами окна программы) |
 
 ## Оператор
 

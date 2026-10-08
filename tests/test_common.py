@@ -213,6 +213,24 @@ class Storage(unittest.TestCase):
         self.assertEqual(st.items[a["id"]]["lver"], lv + 1)
         self.assertNotIn(a["id"], [i["id"] for i in st.active()])
 
+    def test_adopt_owner(self):
+        st = pc.Store(self.p)
+        local = st.add("Без входа", "111", "", time.time() + 60)          # создан до входа
+        synced = st.add("С сервера", "222", "", time.time() + 60)
+        st.items[synced["id"]].update(srv_rev=5, dirty=False)
+        st.since = 9
+        self.assertTrue(st.adopt(1))                  # старый список без владельца
+        self.assertIn(local["id"], st.items)          # неотправленное своё — остаётся
+        self.assertNotIn(synced["id"], st.items)      # пришедшее с сервера — скачаем заново
+        self.assertEqual((st.owner, st.since), (1, 0))
+        self.assertFalse(st.adopt(1))                 # тот же человек — ничего не трогаем
+        self.assertIn(local["id"], st.items)
+        self.assertTrue(st.adopt(2))                  # другой человек — чужого на ПК не остаётся
+        self.assertEqual(st.items, {})
+        self.assertEqual(pc.Store(self.p).owner, 2)   # запомнено на диске
+        st.clear()
+        self.assertIsNone(st.owner)
+
     def test_purge_keeps_unsent(self):
         st = pc.Store(self.p)
         a = st.add("А", "111", "", time.time())

@@ -432,16 +432,34 @@ class Store:
                 self.items[it["id"]] = it
         self.since = int(d.get("since", 0) or 0)
         self.epoch = d.get("epoch")
+        self.owner = d.get("owner")          # id пользователя, чей это список (None — ещё не входили)
 
     def save(self):
         save_json(self.path, {"items": list(self.items.values()), "since": self.since,
-                              "epoch": self.epoch})
+                              "epoch": self.epoch, "owner": self.owner})
+
+    def adopt(self, user_id):
+        """Список на ПК принадлежит user_id. Вошёл другой человек — чужие перезвоны с ПК убираем,
+        его собственные придут с сервера. Возвращает True, если список поменялся."""
+        if user_id is None or self.owner == user_id:
+            return False
+        if self.owner is None:
+            # версия без владельца: всё, что уже приходило с сервера, могло быть чужим — скачаем заново;
+            # созданное на этом ПК и ещё не отправленное (srv_rev=0) — оставляем, уйдёт новому владельцу
+            self.items = {k: i for k, i in self.items.items() if not i.get("srv_rev")}
+        else:
+            self.items = {}
+        self.since = 0
+        self.owner = user_id
+        self.save()
+        return True
 
     def clear(self):
         """Выход из аккаунта: перезвоны остаются на сервере, с этого ПК убираются."""
         self.items = {}
         self.since = 0
         self.epoch = None
+        self.owner = None
         self.save()
 
     # ── изменения от пользователя
