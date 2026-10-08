@@ -1,0 +1,26 @@
+[Unit]
+Description=Перезвон: сервер напоминаний + Telegram-бот
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=perezvon
+Group=perezvon
+Environment=PEREZVON_DATA=/var/lib/perezvon
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /opt/perezvon/perezvon_server.py
+Restart=always
+RestartSec=3
+UMask=0077
+ProtectSystem=strict
+ReadWritePaths=/var/lib/perezvon
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+
+[Install]
+WantedBy=multi-user.target

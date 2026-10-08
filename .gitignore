@@ -1,0 +1,11 @@
+# служебное PyInstaller и Python
+build/
+__pycache__/
+*.pyc
+tests/run_*.log
+# локальные данные/секреты сервера никогда не коммитить
+config.json
+*.db
+*.db-wal
+*.db-shm
+session.bin
