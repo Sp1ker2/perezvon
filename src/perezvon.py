@@ -20,6 +20,7 @@ import tkinter as tk
 
 import pz_common as pc
 import pz_ui as ui
+import pz_update
 from pz_login import LoginForm
 from pz_ui import C, I, px, font, ifont
 
@@ -28,7 +29,7 @@ HOTKEY_TEXT = "Ctrl+Alt+P"
 SYNC_EVERY = 10
 QUICK = [("5 мин", "5"), ("10 мин", "10"), ("15 мин", "15"), ("30 мин", "30"), ("1 ч", "1ч"), ("2 ч", "2ч")]
 COPY_FORMATS = [("plus7", "+7…"), ("8", "8…"), ("raw", "как ввели")]
-INSTANCE = "Perezvon.Client"
+INSTANCE = os.environ.get("PEREZVON_INSTANCE") or "Perezvon.Client"   # переопределяют только тесты
 
 
 def now():
@@ -1349,8 +1350,33 @@ class SettingsDialog(Dialog):
                                               "напоминания приходили. Если закрыть — напоминаний не будет до "
                                               "следующего запуска.")
         ui.Btn(r, "Закрыть", command=self.app.quit, bg=C["chip"], fg=C["red"], size=9, padx=10, pady=4).pack(side="right")
-        tk.Label(self.body, text="Перезвон %s" % pc.APP_VERSION, font=font(8), fg=C["faint"], bg=C["surface"]).pack(
-            anchor="w", pady=(px(14), 0))
+        up = self.app.updater
+        r = self.row(sec, "Версия %s" % pc.APP_VERSION, "Обновления: " + up.status)
+        self.up_sub = r.winfo_children()[0].winfo_children()[1]
+        self.up_btn = ui.Btn(r, "Проверить", icon="refresh", command=self.check_updates, bg=C["chip"], size=9,
+                             padx=10, pady=4)
+        self.up_btn.pack(side="right")
+        self.after(500, self.poll_updates)
+
+    def check_updates(self):
+        up = self.app.updater
+        if up.ready:
+            self.app.apply_update(show_after=True)
+            return
+        if not up.enabled():
+            up.status = "работают только в собранной программе (exe)"
+        else:
+            up.status = "проверяю…"
+            up.check_now()
+
+    def poll_updates(self):
+        if not self.winfo_exists():
+            return
+        up = self.app.updater
+        self.up_sub.configure(text="Обновления: " + up.status)
+        if up.ready:
+            self.up_btn.set_text("Обновить сейчас")
+        self.after(500, self.poll_updates)
 
     def save_server(self):
         v = self.srv.get().strip().rstrip("/")
@@ -1371,8 +1397,9 @@ def _safe(fn):
 class App:
     def __init__(self, home=None, minimized=False):
         self.home = home or pc.app_dir("Perezvon")
+        sandbox = home or os.environ.get("PEREZVON_HOME")      # тесты: всё только в своей папке
         self.settings = Settings(os.path.join(self.home, "settings.json"),
-                                 ui.Session(ui.session_dir("Perezvon", home)))
+                                 ui.Session(ui.session_dir("Perezvon", sandbox)))
         self.store = pc.Store(os.path.join(self.home, "items.json"))
         self.root = tk.Tk()
         self.root.withdraw()
@@ -1387,6 +1414,8 @@ class App:
         self.main = MainWindow(self)
         self.tab = Tab(self)
         self.root.bind("<Unmap>", self.on_unmap, add="+")
+        self.updater = pz_update.Updater("client", pc.APP_VERSION, lambda: self.settings["server"],
+                                         self.home if sandbox else install_dir(), log=_install_log)
         self.hotkey = None
         self.settings_win = None
         self.login_win = None
@@ -1441,7 +1470,25 @@ class App:
     def loop_slow(self):
         self.tab.keep_on_top()
         self.reminders.keep_on_top()
+        self.updater.tick()
+        if self.updater.ready and self.update_is_safe():
+            self.apply_update()
+            return
         self.root.after(3000, self.loop_slow)
+
+    def update_is_safe(self):
+        """Ставим обновление незаметно: окно свёрнуто в иконку, напоминаний нет, форма пустая, диалоги закрыты."""
+        m = self.main
+        busy_form = any(f.get().strip() for f in (m.f_fio, m.f_phone, m.f_note)) or m.edit_id
+        dialogs = any(w is not None and w.winfo_exists() for w in (self.settings_win, self.login_win))
+        return not m.visible() and not self.reminders.open and not busy_form and not dialogs
+
+    def apply_update(self, show_after=False):
+        self.store.save()
+        self.settings.save()
+        args = ["--updated"] + ([] if show_after else ["--autostart"])
+        if self.updater.apply(sys.executable, args):
+            self.quit()
 
     def update_title(self, t=None):
         """Подпись кнопки на панели задач: сразу видно, сколько ждут и есть ли «пора»."""
@@ -1695,19 +1742,12 @@ def _shortcut(lnk, target):
 
 def _install_log(msg):
     try:
-        with open(os.path.join(install_dir(), "install.log"), "a", encoding="utf-8") as f:
+        folder = os.environ.get("PEREZVON_HOME") or install_dir()
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, "install.log"), "a", encoding="utf-8") as f:
             f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + msg + "\n")
     except OSError:
         pass
-
-
-def _launch_clean(path, args=()):
-    """Запуск другой PyInstaller-программы: без наших служебных переменных, иначе новая копия может
-    взять временную папку этой (которую мы сейчас удалим при выходе) и упасть."""
-    env = {k: v for k, v in os.environ.items() if not (k.startswith("_PYI") or k.startswith("_MEI"))}
-    env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
-    subprocess.Popen([path] + list(args), close_fds=True, env=env, cwd=os.path.dirname(path),
-                     creationflags=0x00000008 | 0x00000200)
 
 
 def self_install():
@@ -1755,7 +1795,7 @@ def self_install():
         _install_log("уже запущена — показал окно")
         return True
     for attempt in range(3):                              # запускаем и убеждаемся, что поднялась
-        _launch_clean(target)
+        pz_update.launch_clean(target)
         for _ in range(60):
             time.sleep(0.25)
             if _mutex_exists(INSTANCE):
@@ -1767,6 +1807,8 @@ def self_install():
 
 
 def main():
+    if "--replace" in sys.argv:                      # это новая версия ставит себя на место старой
+        return pz_update.run_replace(sys.argv, lambda: pz_update.mutex_exists(INSTANCE), _install_log)
     ui.setup_dpi()
     if self_install():
         return 0
@@ -1783,6 +1825,9 @@ def main():
             f.write(pc.APP_VERSION)
         return 0
     inst.listen(lambda: app.root.after(0, app.show_main), lambda: app.root.after(0, app.quit))
+    if "--updated" in sys.argv:
+        app.set_status_note("Обновлено до версии %s" % pc.APP_VERSION)
+        _install_log("запущена версия %s после обновления" % pc.APP_VERSION)
     app.start()
     app.root.mainloop()
     return 0

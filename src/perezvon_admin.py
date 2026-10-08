@@ -14,10 +14,12 @@ from tkinter import ttk
 
 import pz_common as pc
 import pz_ui as ui
+import pz_update
 from pz_login import LoginForm
 from pz_ui import C, I, px, font, ifont
 
 REFRESH = 4
+INSTANCE = os.environ.get("PEREZVON_INSTANCE") or "Perezvon.Admin"
 MONTHS = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября",
           "ноября", "декабря"]
 WEEKDAYS = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
@@ -75,7 +77,7 @@ class AdminApp:
     def __init__(self, home=None):
         self.home = home or pc.app_dir("PerezvonAdmin")
         self.s = Settings(os.path.join(self.home, "settings.json"),
-                          ui.Session(ui.session_dir("PerezvonAdmin", home)))
+                          ui.Session(ui.session_dir("PerezvonAdmin", home or os.environ.get("PEREZVON_HOME"))))
         self.root = tk.Tk()
         if os.environ.get("PEREZVON_SELFTEST"):
             self.root.withdraw()
@@ -104,11 +106,25 @@ class AdminApp:
         self.next_at = 0
         self.frame = None
         self.root.report_callback_exception = self.on_error
+        self.updater = pz_update.Updater("admin", pc.APP_VERSION, lambda: self.s.d["server"], self.home,
+                                         log=self.log)
+        self.update_shown = False
         if self.s.token:
             self.build_main()
         else:
             self.build_login()
         self.loop()
+
+    def log(self, msg):
+        try:
+            with open(os.path.join(self.home, "update.log"), "a", encoding="utf-8") as f:
+                f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + msg + "\n")
+        except OSError:
+            pass
+
+    def apply_update(self):
+        if self.updater.apply(sys.executable, ["--updated"]):
+            self.root.destroy()
 
     def on_error(self, exc, val, tb):
         import traceback
@@ -288,8 +304,11 @@ class AdminApp:
         self.dot.pack(side="left", padx=(px(16), px(4)), pady=px(6))
         self.status = tk.Label(foot, text="Загрузка…", font=font(9), fg=C["muted"], bg=C["surface"])
         self.status.pack(side="left")
+        self.up_btn = ui.Btn(foot, "", icon="refresh", command=self.apply_update, bg=C["accent"], fg=C["white"],
+                             size=9, padx=10, pady=3, tooltip="Перезапустится за пару секунд, вход сохранится")
         tk.Label(foot, text="Двойной щелчок — скопировать номер · правая кнопка — действия · F5 — обновить",
                  font=font(8), fg=C["faint"], bg=C["surface"]).pack(side="right", padx=px(16))
+        tk.Label(foot, text="v" + pc.APP_VERSION, font=font(8), fg=C["faint"], bg=C["surface"]).pack(side="right")
         self.update_day_label()
         self.next_at = 0
 
@@ -345,6 +364,11 @@ class AdminApp:
             except queue.Empty:
                 break
             self.handle(kind, res)
+        self.updater.tick()
+        if self.updater.ready and not self.update_shown and hasattr(self, "up_btn") and self.up_btn.winfo_exists():
+            self.update_shown = True
+            self.up_btn.set_text("Доступна версия %s — обновить" % self.updater.ready["version"])
+            self.up_btn.pack(side="right", padx=px(8))
         if self.s.token and hasattr(self, "tree") and self.tree.winfo_exists():
             if time.time() >= self.next_at and not self.busy:
                 self.next_at = time.time() + REFRESH
@@ -687,8 +711,18 @@ def _safe(fn):
 
 
 def main():
+    if "--replace" in sys.argv:                      # новая версия ставит себя на место старой
+        home = pc.app_dir("PerezvonAdmin")
+
+        def log(m):
+            try:
+                with open(os.path.join(home, "update.log"), "a", encoding="utf-8") as f:
+                    f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + m + "\n")
+            except OSError:
+                pass
+        return pz_update.run_replace(sys.argv, lambda: pz_update.mutex_exists(INSTANCE), log)
     ui.setup_dpi()
-    inst = ui.SingleInstance("Perezvon.Admin")
+    inst = ui.SingleInstance(INSTANCE)
     if not inst.ok:
         return 0
     app = AdminApp()

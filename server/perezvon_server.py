@@ -22,6 +22,7 @@ import math
 import os
 import re
 import secrets
+import shutil
 import sqlite3
 import sys
 import threading
@@ -37,7 +38,7 @@ try:
 except ImportError:  # pragma: no cover
     ZoneInfo = None
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 LIMITS = {"fio": 200, "phone": 64, "note": 500, "name": 80, "room": 40, "pc": 80}
 STATUSES = ("active", "done", "deleted")
 ROLE_TITLE = {"operator": "Оператор", "admin": "Админ", "superadmin": "Супер-админ"}
@@ -733,6 +734,22 @@ class App:
                 st["upcoming"] += 1
         return per, [dict(r) for r in rows]
 
+    # ── обновления программ: /var/lib/perezvon/updates/manifest.json + exe (кладёт release.py)
+    def update_entry(self, app_kind):
+        if app_kind not in ("client", "admin"):
+            return None
+        try:
+            with open(os.path.join(self.dir, "updates", "manifest.json"), encoding="utf-8") as f:
+                ent = json.load(f).get(app_kind)
+        except (OSError, ValueError):
+            return None
+        if not isinstance(ent, dict) or not ent.get("file"):
+            return None
+        path = os.path.join(self.dir, "updates", os.path.basename(str(ent["file"])))
+        if not os.path.isfile(path):
+            return None
+        return dict(ent, path=path)
+
     def purge_old(self):
         now = time.time()
         with self.db.tx() as db:
@@ -756,6 +773,16 @@ class Handler(BaseHTTPRequestHandler):
         if ip in ("127.0.0.1", "::1"):
             ip = self.headers.get("X-Real-IP") or ip
         return ip
+
+    def send_file(self, path):
+        size = os.path.getsize(path)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(size))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        with open(path, "rb") as f:
+            shutil.copyfileobj(f, self.wfile, 1 << 16)
 
     def send(self, code, obj):
         raw = json.dumps(obj, ensure_ascii=False).encode("utf-8")
@@ -808,6 +835,16 @@ class Handler(BaseHTTPRequestHandler):
             a = self.app
             if path == "/api/ping":
                 return self.send(200, {"ok": True, "version": VERSION, "server_now": time.time()})
+            if method == "GET" and path == "/api/update":
+                ent = a.update_entry(qs.get("app", ""))
+                if not ent:
+                    return self.send(200, {"version": None})
+                return self.send(200, {k: ent.get(k) for k in ("version", "sha256", "size", "sig")})
+            if method == "GET" and path == "/api/update/file":
+                ent = a.update_entry(qs.get("app", ""))
+                if not ent:
+                    return self.send(404, {"error": "Обновления нет"})
+                return self.send_file(ent["path"])
             if method == "POST" and path == "/api/login":
                 b = self.body()
                 code, obj = a.login(str(b.get("login") or b.get("code") or ""),

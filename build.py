@@ -49,35 +49,55 @@ def version_file(path, name, desc, ver):
 ''' % (t, t, desc, ver, name, name + ".exe", ver))
 
 
-def build(script, name, desc, icon, ver):
+def build(script, name, desc, icon, ver, src=SRC, dist=DIST):
     vf = os.path.join(WORK, name + "-version.txt")
     version_file(vf, name, desc, ver)
     cmd = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--onefile", "--windowed",
            "--name", name, "--icon", icon, "--version-file", vf,
            "--add-data", "%s%s." % (icon, os.pathsep),
-           "--distpath", DIST, "--workpath", os.path.join(WORK, name), "--specpath", WORK,
-           "--paths", SRC,
+           "--distpath", dist, "--workpath", os.path.join(WORK, name), "--specpath", WORK,
+           "--paths", src,
            "--exclude-module", "PIL", "--exclude-module", "numpy", "--exclude-module", "unittest",
-           os.path.join(SRC, script)]
+           os.path.join(src, script)]
     print(">>", name)
     subprocess.run(cmd, check=True)
 
 
 def main():
+    """python build.py [--version X --dist DIR] — тестовую версию с другим номером собираем из копии исходников."""
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--version")
+    ap.add_argument("--dist", default=DIST)
+    ap.add_argument("--only", choices=("client", "admin"))
+    a = ap.parse_args()
     ver = version()
+    src, dist = SRC, a.dist
+    if a.version and a.version != ver:
+        src = os.path.join(WORK, "src-" + a.version)
+        shutil.rmtree(src, ignore_errors=True)
+        shutil.copytree(SRC, src, ignore=shutil.ignore_patterns("__pycache__"))
+        p = os.path.join(src, "pz_common.py")
+        s = open(p, encoding="utf-8").read().replace('APP_VERSION = "%s"' % ver, 'APP_VERSION = "%s"' % a.version)
+        open(p, "w", encoding="utf-8").write(s)
+        ver = a.version
     os.makedirs(WORK, exist_ok=True)
-    os.makedirs(DIST, exist_ok=True)
+    os.makedirs(dist, exist_ok=True)
     ico_c = os.path.join(WORK, "perezvon.ico")
     ico_a = os.path.join(WORK, "perezvon-admin", "perezvon.ico")
     os.makedirs(os.path.dirname(ico_a), exist_ok=True)
     make_icon(ico_c, "", (61, 139, 253, 255))          # трубка на синем
     make_icon(ico_a, "", (34, 181, 115, 255))           # люди на зелёном
-    build("perezvon.py", "Перезвон", "Перезвон — напоминания перезвонить", ico_c, ver)
-    build("perezvon_admin.py", "Перезвон Админ", "Перезвон — админка", ico_a, ver)
+    if a.only != "admin":
+        build("perezvon.py", "Перезвон", "Перезвон — напоминания перезвонить", ico_c, ver, src, dist)
+    if a.only != "client":
+        build("perezvon_admin.py", "Перезвон Админ", "Перезвон — админка", ico_a, ver, src, dist)
     for n in ("Перезвон.exe", "Перезвон Админ.exe"):
-        p = os.path.join(DIST, n)
-        print("%s  %.1f МБ" % (p, os.path.getsize(p) / 1048576))
-    shutil.copy2(os.path.join(ROOT, "server", "perezvon_server.py"), os.path.join(DIST, "perezvon_server.py"))
+        p = os.path.join(dist, n)
+        if os.path.exists(p):
+            print("%s  %.1f МБ" % (p, os.path.getsize(p) / 1048576))
+    if dist == DIST:
+        shutil.copy2(os.path.join(ROOT, "server", "perezvon_server.py"), os.path.join(DIST, "perezvon_server.py"))
     print("версия", ver)
 
 

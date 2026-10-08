@@ -17,7 +17,7 @@ import urllib.request
 import uuid
 
 APP_NAME = "Перезвон"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 ADMIN_ROLES = ("admin", "superadmin")
 DEFAULT_SERVER = "https://89.124.122.158/perezvon"
 

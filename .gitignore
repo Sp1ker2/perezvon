@@ -8,3 +8,5 @@ tests/run_*.log
 *.db-wal
 *.db-shm
 session.bin
+dist/updates/
+dist-test/
