@@ -1,0 +1,11 @@
+{
+ "bot_token": "8802882836:AAF21mUst43FXVhEd4EnY_vLCU7U5UluUTU",
+ "owners": [
+  8267218455
+ ],
+ "tz": "Europe/Moscow",
+ "port": 8767,
+ "bind": "127.0.0.1",
+ "missed_grace_min": 10,
+ "login_confirm": false
+}
