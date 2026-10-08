@@ -318,43 +318,82 @@ class Sync(Base):
 
 
 class AdminView(Base):
-    def test_day_view_and_actions(self):
-        a, _ = self.login("@anna_smirnova")
-        o, _ = self.login("@oleg_kim")
-        sa, so = self.store("a"), self.store("o")
-        now = time.time()
-        upcoming = sa.add("Будущий", "111", "", now + 3600)
-        missed = sa.add("Пропущенный", "222", "", now - 3600)
-        theirs = so.add("Олегов", "333", "", now + 60)
-        sync(a, sa)
-        sync(o, so)
-        adm, _ = self.login("@boss_one", "admin")
+    def day(self, api):
         import datetime as dt
         start = dt.datetime.combine(dt.date.today(), dt.time.min).timestamp()
-        res = adm.call("GET", "/api/admin/day", params={"from": start, "to": start + 86400})
+        return api.call("GET", "/api/admin/day", params={"from": start, "to": start + 86400})
+
+    def seed(self):
+        a, _ = self.login("@anna_smirnova")             # vn2
+        o, _ = self.login("@oleg_kim")                  # vn3
+        sa, so = self.store("a"), self.store("o")
+        now = time.time()
+        self.upcoming = sa.add("Будущий", "111", "", now + 3600)
+        self.missed = sa.add("Пропущенный", "222", "", now - 3600)
+        self.theirs = so.add("Олегов", "333", "", now + 60)
+        sync(a, sa)
+        sync(o, so)
+        return a, sa
+
+    def test_superadmin_sees_all_and_acts(self):
+        a, sa = self.seed()
+        sup, _ = self.login("@super_one", "admin")
+        res = self.day(sup)
         ids = {i["id"] for i in res["items"]}
-        self.assertTrue({upcoming["id"], missed["id"], theirs["id"]} <= ids)
-        self.assertIn("vn3", res["rooms"] + [u["room"] for u in res["users"]])
+        self.assertTrue({self.upcoming["id"], self.missed["id"], self.theirs["id"]} <= ids)
+        self.assertIn("vn3", res["rooms"])
+        self.assertTrue(res["can_act"])
         names = {u["name"]: u for u in res["users"]}
         self.assertTrue(names["Анна Смирнова"]["online"])
-        # оператор не может в админ-API
-        with self.assertRaises(pc.ApiError) as c:
-            a.call("GET", "/api/admin/day", params={"from": start, "to": start + 86400})
+        with self.assertRaises(pc.ApiError) as c:                # оператор не может в админ-API
+            self.day(a)
         self.assertEqual(c.exception.status, 403)
-        # действия админа доходят до оператора
-        adm.call("POST", "/api/admin/item", {"id": missed["id"], "action": "done"})
+        sup.call("POST", "/api/admin/item", {"id": self.missed["id"], "action": "done"})
         sync(a, sa)
-        self.assertEqual(sa.items[missed["id"]]["status"], "done")
+        self.assertEqual(sa.items[self.missed["id"]]["status"], "done")
         with self.assertRaises(pc.ApiError) as c:
-            adm.call("POST", "/api/admin/item", {"id": missed["id"], "action": "done"})
+            sup.call("POST", "/api/admin/item", {"id": self.missed["id"], "action": "done"})
         self.assertEqual(c.exception.status, 409)
-        adm.call("POST", "/api/admin/item", {"id": missed["id"], "action": "restore"})
+        sup.call("POST", "/api/admin/item", {"id": self.missed["id"], "action": "restore"})
         sync(a, sa)
-        self.assertEqual(sa.items[missed["id"]]["status"], "active")
+        self.assertEqual(sa.items[self.missed["id"]]["status"], "active")
         with self.assertRaises(pc.ApiError):
-            adm.call("POST", "/api/admin/item", {"id": missed["id"], "action": "explode"})
+            sup.call("POST", "/api/admin/item", {"id": self.missed["id"], "action": "explode"})
         with self.assertRaises(pc.ApiError):
-            adm.call("GET", "/api/admin/day", params={"from": 10, "to": 10 + 86400 * 100})
+            sup.call("GET", "/api/admin/day", params={"from": 10, "to": 10 + 86400 * 100})
+
+    def test_admin_sees_only_own_room_read_only(self):
+        self.seed()
+        adm, _ = self.login("@boss_one", "admin")              # админ комнаты vn2
+        res = self.day(adm)
+        ids = {i["id"] for i in res["items"]}
+        self.assertEqual(ids, {self.upcoming["id"], self.missed["id"]})   # vn3 (Олег) не видно
+        self.assertEqual(res["rooms"], ["vn2"])
+        self.assertNotIn("Олег Ким", [u["name"] for u in res["users"]])
+        self.assertFalse(res["can_act"])
+        with self.assertRaises(pc.ApiError) as c:              # только смотрит
+            adm.call("POST", "/api/admin/item", {"id": self.missed["id"], "action": "done"})
+        self.assertEqual(c.exception.status, 403)
+        self.assertEqual(self.app.item(self.missed["id"])["status"], "active")
+        # перевели админа в vn3 — видит уже её
+        self.app.update_user(self.boss["id"], room="vn3")
+        ids = {i["id"] for i in self.day(adm)["items"]}
+        self.assertEqual(ids, {self.theirs["id"]})
+
+    def test_admins_cannot_use_operator_app(self):
+        for nick in ("@boss_one", "@super_one"):
+            with self.assertRaises(pc.ApiError) as c:
+                self.login(nick, "client")
+            self.assertEqual(c.exception.status, 403)
+            self.assertIn("Перезвон Админ", c.exception.message)
+        # оператор вошёл в «Перезвон», потом его сделали админом → программа оператора его выкидывает
+        a, _ = self.login("@anna_smirnova")
+        a.call("POST", "/api/sync", {"items": []})
+        self.app.update_user(self.anna["id"], role="admin")
+        with self.assertRaises(pc.ApiError) as c:
+            a.call("POST", "/api/sync", {"items": []})
+        self.assertEqual(c.exception.status, 401)
+        self.login("@anna_smirnova", "admin")                    # а в админку — пожалуйста
 
     def test_carry_over_missed(self):
         a, _ = self.login("@anna_smirnova")
@@ -453,6 +492,16 @@ class Notify(Base):
             boss = "\n".join(m["text"] for m in tg.sent(502))
             self.assertIn("Пропущен перезвон", boss)
             self.assertIn("Давно", boss)
+            # Олег (vn3) пропустил — админу vn2 не приходит, супер-админу приходит
+            o, _ = self.login("@oleg_kim")
+            so = self.store("o")
+            so.add("Чужая комната", "444", "", time.time() - 3600)
+            sync(o, so)
+            self.app.link_by_username("super_one", 504, "Главный")
+            tg.clear()
+            srv.notify_once(self.app)
+            self.assertNotIn("Чужая комната", "\n".join(m["text"] for m in tg.sent(502)))
+            self.assertIn("Чужая комната", "\n".join(m["text"] for m in tg.sent(504)))
             self.assertNotIn("Сейчас", boss)                  # ещё в пределах 10 минут
             self.assertEqual(tg.sent(503), [])
             n = len(tg.calls)

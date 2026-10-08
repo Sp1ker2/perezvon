@@ -205,6 +205,27 @@ class Rights(BotBase):
         self.assertFalse(any("Пользователи" in x for x in labels))
         t = self.press(800, "missed")
         self.assertIn("Пропущенные", t)
+        # перезвоны двух комнат: админ vn2 видит только vn2
+        import pz_common as pc
+        import threading
+        self.say(OWNER, "/adduser @op_vn2; Оп Два; vn2; оператор")
+        self.say(OWNER, "/adduser @op_vn3; Оп Три; vn3; оператор")
+        for nick, fio in (("@op_vn2", "Клиент двойки"), ("@op_vn3", "Клиент тройки")):
+            tok = pc.login_flow(pc.Api(self.S.url), nick, "client", "PC", threading.Event())["token"]
+            pc.Api(self.S.url, tok).call("POST", "/api/sync", {"now": time.time(), "items": [{
+                "id": (("a" if "vn2" in nick else "b") * 32), "fio": fio, "phone": "123", "due": time.time() - 3600,
+                "created": time.time() - 4000, "status": "active", "base": 0}]})
+        t = self.press(800, "today")
+        self.assertIn("комната vn2", t)
+        self.assertNotIn("vn3", t)
+        t = self.press(800, "missed")
+        self.assertIn("Клиент двойки", t)
+        self.assertNotIn("Клиент тройки", t)
+        t = self.press(OWNER, "missed")                         # супер-админ — все комнаты
+        self.assertIn("Клиент двойки", t)
+        self.assertIn("Клиент тройки", t)
+        self.bot.handle(tg_cb(800, "it:d:" + "a" * 32))          # админ не отмечает чужое
+        self.assertEqual(self.app.item("a" * 32)["status"], "active")
         n = len(self.app.users())
         self.bot.handle(tg_cb(800, "nu"))
         self.say(800, "/adduser @hack_er; Х; vn2; супер")

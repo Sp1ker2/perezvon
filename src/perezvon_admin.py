@@ -454,7 +454,9 @@ class AdminApp:
             self.empty.configure(text="Здесь пусто" if (self.filter or q or self.room or self.operator)
                                  else "На этот день перезвонов нет")
             self.empty.place(relx=0.5, rely=0.4, anchor="center")
-        title = "Все комнаты" if self.room is None else "Комната " + self.room
+        title = ("Все комнаты" if self.room is None else "Комната " + self.room)
+        if len(rooms) == 1 and not self.data.get("can_act", True):
+            title = "Комната " + rooms[0] + " · только просмотр"
         if self.operator is not None:
             title += " · " + next((x["name"] for x in users if x["id"] == self.operator), "?")
         if self.filter:
@@ -466,7 +468,10 @@ class AdminApp:
             self.reset_btn.pack_forget()
         bot = self.data.get("bot")
         self.bot_hint.configure(text="Пользователи, комнаты и роли создаются в Telegram-боте%s. "
-                                     "Туда же приходят пропущенные перезвоны." % (" @" + bot if bot else ""))
+                                     "Туда же приходят пропущенные перезвоны.%s" % (
+                                         " @" + bot if bot else "",
+                                         "" if self.data.get("can_act", True) else
+                                         "\nВы админ: видна только ваша комната."))
         self.paint_status()
 
     def row_values(self, it, bk, t):
@@ -648,6 +653,11 @@ class AdminApp:
         m = tk.Menu(self.root, tearoff=0, bg=C["card"], fg=C["text"], activebackground=C["accent_d"],
                     activeforeground=C["white"], bd=0, font=font(10))
         m.add_command(label="Скопировать номер", command=self.copy_selected)
+        if not (self.data or {}).get("can_act", True):
+            m.add_separator()
+            m.add_command(label="Админ только смотрит — менять может супер-админ", state="disabled")
+            m.tk_popup(e.x_root, e.y_root)
+            return
         if it["status"] == "active":
             m.add_command(label="Отметить: перезвонили", command=lambda: self.action(iid, "done"))
             m.add_command(label="Отложить на 15 минут", command=lambda: self.action(iid, "snooze15"))

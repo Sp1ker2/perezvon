@@ -53,6 +53,13 @@ def is_admin(u):
 def is_super(u):
     """Супер-админ: ещё и управляет пользователями, комнатами и ролями."""
     return bool(u) and u.get("role") == "superadmin"
+
+
+def sees_room(u, room):
+    """Админ видит только свою комнату, супер-админ — все."""
+    if is_super(u):
+        return True
+    return is_admin(u) and (room or "").casefold() == (u.get("room") or "").casefold()
 ONLINE_SEC = 60
 
 
@@ -484,6 +491,8 @@ class App:
             return 403, {"error": "Доступ отключён администратором"}
         if app == "admin" and u["role"] not in ADMIN_ROLES:
             return 403, {"error": "У вас роль «оператор» — админка недоступна. Войдите в программу «Перезвон»"}
+        if app != "admin" and u["role"] in ADMIN_ROLES:
+            return 403, {"error": "Вы администратор: перезвоны создают операторы. Для вас — программа «Перезвон Админ»"}
         if is_code or not self.confirm:
             return 200, {"token": self.issue_token(u, app, pc, version), "user": self.user_public(u)}
         # по нику — подтверждение одной кнопкой в Telegram
@@ -555,6 +564,8 @@ class App:
                         "WHERE d.token_hash=?", (sha(token),))
         if not r or r["blocked"]:
             return None
+        if r["app"] != "admin" and r["role"] in ADMIN_ROLES:
+            return None                    # стал админом — программа оператора больше не для него
         return dict(r)
 
     @staticmethod
@@ -681,25 +692,34 @@ class App:
                 raise ValueError("Неизвестное действие")
         return self.item(iid)
 
-    def day_view(self, t_from, t_to, carry=True):
+    def day_view(self, t_from, t_to, carry=True, viewer=None):
         now = time.time()
         rows = self.db.q("SELECT * FROM items WHERE (due>=? AND due<?) OR (? AND status='active' AND due<?) "
                          "ORDER BY due", (t_from, t_to, 1 if carry else 0, t_from))
+        if viewer is not None:
+            rows = [r for r in rows if sees_room(viewer, r["room"])]
+        rooms = [r["name"] for r in self.rooms()]
+        if viewer is not None and not is_super(viewer):
+            rooms = [viewer["room"]]
         users = []
         for u in self.users():
+            if viewer is not None and not sees_room(viewer, u["room"]):
+                continue
             ls = self.last_seen(u["id"])
             users.append({"id": u["id"], "name": u["name"], "room": u["room"], "role": u["role"],
                           "blocked": bool(u["blocked"]), "tg": bool(u["tg_chat"]), "last_seen": ls,
                           "online": bool(ls and now - ls < ONLINE_SEC)})
         return {"server_now": now, "grace": self.grace, "items": [self.item_out(r) for r in rows],
-                "users": users, "rooms": [r["name"] for r in self.rooms()],
-                "bot": self.bot.username if self.bot else None}
+                "users": users, "rooms": rooms, "bot": self.bot.username if self.bot else None,
+                "can_act": viewer is None or is_super(viewer)}
 
-    def day_stats(self, now=None):
+    def day_stats(self, now=None, viewer=None):
         now = time.time() if now is None else now
         a, b = self.day_bounds(now)
         rows = self.db.q("SELECT * FROM items WHERE ((due>=? AND due<?) OR (status='active' AND due<?)) "
                          "AND status<>'deleted'", (a, b, a))
+        if viewer is not None:
+            rows = [r for r in rows if sees_room(viewer, r["room"])]
         per = {}
         for r in rows:
             st = per.setdefault(r["room"] or "—", {"upcoming": 0, "missed": 0, "due": 0, "done": 0})
@@ -816,8 +836,11 @@ class Handler(BaseHTTPRequestHandler):
                     t_to = fnum(qs.get("to"))
                     if t_from is None or t_to is None or not (0 < t_to - t_from <= 40 * 86400):
                         return self.send(400, {"error": "Неверный период"})
-                    return self.send(200, a.day_view(t_from, t_to, qs.get("carry", "1") == "1"))
+                    viewer = {"role": dev["role"], "room": dev["room"]}
+                    return self.send(200, a.day_view(t_from, t_to, qs.get("carry", "1") == "1", viewer))
                 if method == "POST" and path == "/api/admin/item":
+                    if dev["role"] != "superadmin":
+                        return self.send(403, {"error": "Админ только смотрит — менять перезвоны может супер-админ"})
                     b = self.body()
                     try:
                         it = a.item_action(str(b.get("id") or ""), str(b.get("action") or ""),
@@ -979,7 +1002,7 @@ class Bot:
         self.send(chat, "✅ <b>%s</b>, вы подключены · комната %s · %s\n\nЧтобы войти: %s\n\n%s" % (
             esc(u["name"]), esc(u["room"]), ROLE_TITLE[u["role"]].lower(), how,
             {"operator": "Сюда будут приходить напоминания о перезвонах.",
-             "admin": "Вы админ: здесь видно все перезвоны, сюда приходят пропущенные.",
+             "admin": "Вы админ своей комнаты: здесь видно её перезвоны, сюда приходят её пропущенные.",
              "superadmin": "Вы супер-админ: здесь создаются пользователи и комнаты, сюда приходят пропущенные."}
             [u["role"]]))
         self.menu(chat, u)
@@ -1086,9 +1109,9 @@ class Bot:
 
     def help(self, chat, u):
         if is_admin(u) and not is_super(u):
-            t = ("Вы <b>админ</b>: видите перезвоны всех комнат (📋 Сегодня, ⚠️ Пропущенные), сюда приходят "
-                 "пропущенные. Подробно — в программе «Перезвон Админ» (вход по вашему нику).\n"
-                 "Пользователей и комнаты создаёт супер-админ.")
+            t = ("Вы <b>админ</b> комнаты <b>%s</b>: видите её перезвоны (📋 Сегодня, ⚠️ Пропущенные), сюда "
+                 "приходят её пропущенные. Подробно — в программе «Перезвон Админ» (вход по вашему нику).\n"
+                 "Менять перезвоны и создавать пользователей может супер-админ." % esc(u["room"]))
         elif is_super(u):
             t = ("<b>Как создать пользователя</b>\n"
                  "• Кнопка «➕ Создать пользователя» — бот спросит ник в Telegram, имя, комнату и роль.\n"
@@ -1101,7 +1124,7 @@ class Bot:
                  "Нажать «Старт» в боте нужно, только чтобы напоминания приходили и в Telegram.\n"
                  "Если ника в Telegram нет — в карточке пользователя есть «🔑 Код входа».\n\n"
                  "<b>Роли</b>\n👤 Оператор — видит только свои перезвоны.\n"
-                 "🛡 Админ — видит все комнаты, получает пропущенные, но не управляет пользователями.\n"
+                 "🛡 Админ — только смотрит свою комнату и получает её пропущенные.\n"
                  "👑 Супер-админ — всё, как у вас: пользователи, комнаты, роли.")
         else:
             t = ("Перезвоны создаются в программе «Перезвон» на компьютере. Сюда приходят напоминания: "
@@ -1194,10 +1217,10 @@ class Bot:
 
     def today(self, chat, u, msg_id=None):
         now = time.time()
-        per, rows = self.app.day_stats(now)
+        per, rows = self.app.day_stats(now, viewer=u if is_admin(u) else None)
         date = self.app.local(now).strftime("%d.%m")
         if is_admin(u):
-            lines = ["📋 <b>Сегодня, %s</b>" % date, ""]
+            lines = ["📋 <b>Сегодня, %s</b>%s" % (date, "" if is_super(u) else " · комната " + esc(u["room"])), ""]
             tot = {"upcoming": 0, "missed": 0, "due": 0, "done": 0}
             for room in sorted(per, key=str.lower):
                 s = per[room]
@@ -1226,7 +1249,7 @@ class Bot:
 
     def missed(self, chat, u, msg_id=None):
         now = time.time()
-        _, rows = self.app.day_stats(now)
+        _, rows = self.app.day_stats(now, viewer=u)
         ms = [r for r in rows if r["status"] == "active" and r["due"] < now - self.app.grace]
         ms.sort(key=lambda r: r["due"])
         lines = ["⚠️ <b>Пропущенные</b> (%d)" % len(ms), ""]
@@ -1236,7 +1259,7 @@ class Bot:
         return self.edit(chat, msg_id, text, mk) if msg_id else self.send(chat, text, mk)
 
     def created_text(self, x, code):
-        app = "«Перезвон Админ» (или «Перезвон»)" if is_admin(x) else "«Перезвон»"
+        app = "«Перезвон Админ»" if is_admin(x) else "«Перезвон»"
         bot = ("@" + self.username) if self.username else "этого бота"
         head = "✅ <b>Пользователь создан</b>\n\nИмя: <b>%s</b>\nКомната: <b>%s</b>\nРоль: <b>%s</b>\n" % (
             esc(x["name"]), esc(x["room"]), ROLE_TITLE[x["role"]])
@@ -1377,7 +1400,7 @@ class Bot:
         if m:
             act = {"d": "done", "s": "snooze15", "n": "noanswer"}[m.group(1)]
             it = self.app.item(m.group(2))
-            if not it or (it["user_id"] != u["id"] and not is_admin(u)):
+            if not it or (it["user_id"] != u["id"] and not is_super(u)):
                 return self.answer(cid, "Перезвон не найден", True)
             try:
                 it = self.app.item_action(it["id"], act, "tg:" + u["name"])
@@ -1553,9 +1576,9 @@ class Bot:
                             self.app.hm(it["due"], now), (now - it["due"]) // 60))
 
 
-ROLES_HELP = ("👤 Оператор — видит только свои перезвоны.\n"
-              "🛡 Админ — видит все комнаты и пропущенные, пользователями не управляет.\n"
-              "👑 Супер-админ — может всё: пользователи, комнаты, роли.")
+ROLES_HELP = ("👤 Оператор — создаёт перезвоны, видит только свои.\n"
+              "🛡 Админ — только смотрит перезвоны СВОЕЙ комнаты и получает её пропущенные.\n"
+              "👑 Супер-админ — может всё: все комнаты, пользователи, роли.")
 
 
 def parse_role(s):
@@ -1610,8 +1633,9 @@ def notify_once(app):
         if now - it["due"] > 6 * 3600:
             continue
         for adm in admins:
-            app.bot.notify_missed(it, adm["tg_chat"])
-            sent += 1
+            if sees_room(adm, it["room"]):
+                app.bot.notify_missed(it, adm["tg_chat"])
+                sent += 1
     return sent
 
 
